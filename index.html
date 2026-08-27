@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chess — Play a Friend</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
+<style>
+  :root{
+    --dark-sq:#4a5a40;
+    --light-sq:#e9e4d3;
+    --board-border:#2b2b26;
+    --bg:#1c1b19;
+    --panel:#26241f;
+    --text:#eee8dd;
+    --muted:#9b9686;
+    --accent:#c9974c;
+    --danger:#a3453b;
+    --sel:rgba(201,151,76,0.55);
+    --move-dot:rgba(201,151,76,0.85);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    min-height:100vh;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:24px 16px 60px;
+  }
+  h1{
+    font-size:20px;
+    letter-spacing:0.04em;
+    text-transform:uppercase;
+    color:var(--accent);
+    margin:0 0 24px;
+    font-weight:600;
+  }
+  .panel{
+    background:var(--panel);
+    border:1px solid #3a372f;
+    border-radius:10px;
+    padding:22px;
+    width:100%;
+    max-width:420px;
+    margin-bottom:20px;
+  }
+  .panel p{ color:var(--muted); font-size:14px; line-height:1.5; margin:0 0 16px;}
+  button{
+    background:var(--accent);
+    color:#1c1b19;
+    border:none;
+    border-radius:6px;
+    padding:11px 18px;
+    font-size:14px;
+    font-weight:600;
+    cursor:pointer;
+    width:100%;
+    margin-bottom:10px;
+    transition:filter 0.15s;
+  }
+  button:hover{ filter:brightness(1.08); }
+  button:disabled{ opacity:0.5; cursor:default; }
+  button.secondary{
+    background:transparent;
+    color:var(--text);
+    border:1px solid #4a473d;
+  }
+  .row{ display:flex; gap:8px; }
+  .row button{ margin-bottom:0; }
+  input[type=text]{
+    width:100%;
+    padding:10px;
+    border-radius:6px;
+    border:1px solid #4a473d;
+    background:#161512;
+    color:var(--text);
+    font-size:13px;
+    margin-bottom:10px;
+  }
+  #status{
+    font-size:13px;
+    color:var(--muted);
+    min-height:18px;
+    margin-top:4px;
+  }
+  #gameArea{ display:none; flex-direction:column; align-items:center; }
+  #topInfo{
+    display:flex;
+    justify-content:space-between;
+    width:100%;
+    max-width:400px;
+    margin-bottom:8px;
+    font-size:13px;
+    color:var(--muted);
+  }
+  #turnBanner{
+    font-size:14px;
+    font-weight:600;
+    color:var(--text);
+    margin-bottom:10px;
+    letter-spacing:0.02em;
+  }
+  #board{
+    display:grid;
+    grid-template-columns:repeat(8,minmax(0,1fr));
+    width:min(400px,92vw);
+    height:min(400px,92vw);
+    border:3px solid var(--board-border);
+    border-radius:4px;
+    overflow:hidden;
+  }
+  .sq{
+    position:relative;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:min(7vw,32px);
+    cursor:pointer;
+    user-select:none;
+  }
+  .sq.light{ background:var(--light-sq); }
+  .sq.dark{ background:var(--dark-sq); }
+  .sq.selected::after{
+    content:"";
+    position:absolute;
+    inset:0;
+    background:var(--sel);
+  }
+  .sq.legal::before{
+    content:"";
+    position:absolute;
+    width:22%;
+    height:22%;
+    border-radius:50%;
+    background:var(--move-dot);
+  }
+  .sq.legal.capture::before{
+    width:78%;
+    height:78%;
+    border-radius:50%;
+    background:transparent;
+    border:4px solid var(--move-dot);
+  }
+  .sq.lastmove{ box-shadow:inset 0 0 0 3px rgba(201,151,76,0.6); }
+  .piece{ position:relative; z-index:1; filter:drop-shadow(0 1px 1px rgba(0,0,0,0.4)); }
+  .piece.white{ color:#f5f2ea; }
+  .piece.black{ color:#161512; }
+  #controls{
+    display:flex;
+    gap:10px;
+    width:min(400px,92vw);
+    margin-top:14px;
+  }
+  #controls button{ margin:0; }
+  .footnote{
+    color:var(--muted);
+    font-size:11px;
+    margin-top:24px;
+    text-align:center;
+    max-width:400px;
+  }
+  .link-box{ display:flex; gap:8px; }
+  .link-box input{ margin-bottom:0; }
+  .copy-btn{ width:auto; padding:10px 14px; }
+  #promoModal{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.6);
+    align-items:center;
+    justify-content:center;
+    z-index:10;
+  }
+  #promoBox{
+    background:var(--panel);
+    border:1px solid #4a473d;
+    border-radius:10px;
+    padding:18px;
+    display:flex;
+    gap:10px;
+  }
+  #promoBox button{
+    width:56px;
+    height:56px;
+    font-size:28px;
+    margin:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+</style>
+</head>
+<body>
+
+<h1>Chess</h1>
+
+<div id="lobby" class="panel">
+  <div id="lobbyHome">
+    <p>Start a game and send the invite link to whoever you're playing. No accounts, no server, just the two of you.</p>
+    <button id="createBtn">Create Game</button>
+  </div>
+
+  <div id="lobbyHost" style="display:none;">
+    <p>Send this link to your opponent. Keep this tab open while you wait.</p>
+    <div class="link-box">
+      <input type="text" id="linkOut" readonly>
+      <button class="copy-btn" id="copyBtn">Copy</button>
+    </div>
+    <div id="status">Setting up...</div>
+  </div>
+
+  <div id="lobbyJoin" style="display:none;">
+    <p>You've been invited to a game.</p>
+    <button id="joinBtn">Join Game</button>
+    <div id="statusJoin"></div>
+  </div>
+</div>
+
+<div id="gameArea">
+  <div id="topInfo">
+    <span id="youAre">You are —</span>
+    <span id="connStatus">connected</span>
+  </div>
+  <div id="turnBanner">—</div>
+  <div id="board"></div>
+  <div id="controls">
+    <button class="secondary" id="resignBtn">Resign</button>
+    <button class="secondary" id="newLinkBtn">New Game</button>
+  </div>
+</div>
+
+<div id="promoModal">
+  <div id="promoBox"></div>
+</div>
+
+<p class="footnote">Peer-to-peer over WebRTC. Moves travel directly between your two browsers; nothing is stored on a server. Works fine hosted from GitHub Pages.</p>
+
+<script>
+const PIECE_GLYPHS = {
+  p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚'
+};
+
+let game = new Chess();
+let peer, conn;
+let isHost = false;
+let myColor = null; // 'w' or 'b'
+let selected = null;
+let legalTargets = [];
+let lastMove = null;
+
+const boardEl = document.getElementById('board');
+const lobbyHome = document.getElementById('lobbyHome');
+const lobbyHost = document.getElementById('lobbyHost');
+const lobbyJoin = document.getElementById('lobbyJoin');
+const lobby = document.getElementById('lobby');
+const gameArea = document.getElementById('gameArea');
+const statusEl = document.getElementById('status');
+const statusJoinEl = document.getElementById('statusJoin');
+const turnBanner = document.getElementById('turnBanner');
+const youAreEl = document.getElementById('youAre');
+const connStatusEl = document.getElementById('connStatus');
+
+function getRoomIdFromUrl(){
+  const params = new URLSearchParams(window.location.search);
+  return params.get('room');
+}
+
+function buildInviteLink(id){
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.searchParams.set('room', id);
+  return url.toString();
+}
+
+// ---------- Lobby flow ----------
+
+const existingRoom = getRoomIdFromUrl();
+if (existingRoom) {
+  lobbyHome.style.display = 'none';
+  lobbyJoin.style.display = 'block';
+}
+
+document.getElementById('createBtn').addEventListener('click', createGame);
+document.getElementById('joinBtn').addEventListener('click', () => joinGame(existingRoom));
+document.getElementById('copyBtn').addEventListener('click', () => {
+  const input = document.getElementById('linkOut');
+  input.select();
+  navigator.clipboard.writeText(input.value).then(() => {
+    document.getElementById('copyBtn').textContent = 'Copied';
+    setTimeout(() => document.getElementById('copyBtn').textContent = 'Copy', 1500);
+  });
+});
+document.getElementById('resignBtn').addEventListener('click', () => {
+  if (conn && conn.open) conn.send({type:'resign'});
+  turnBanner.textContent = 'You resigned.';
+  disableBoard();
+});
+document.getElementById('newLinkBtn').addEventListener('click', () => {
+  window.location.href = window.location.pathname;
+});
+
+function createGame(){
+  lobbyHome.style.display = 'none';
+  lobbyHost.style.display = 'block';
+  isHost = true;
+  myColor = 'w';
+
+  peer = new Peer();
+
+  peer.on('open', id => {
+    document.getElementById('linkOut').value = buildInviteLink(id);
+    statusEl.textContent = 'Waiting for your opponent to open the link...';
+  });
+
+  peer.on('connection', c => {
+    conn = c;
+    setupConnection();
+    conn.on('open', () => {
+      statusEl.textContent = 'Opponent connected!';
+      startGame();
+    });
+  });
+
+  peer.on('error', err => {
+    statusEl.textContent = 'Connection error: ' + err.type;
+  });
+}
+
+function joinGame(hostId){
+  lobbyJoin.style.display = 'block';
+  document.getElementById('joinBtn').disabled = true;
+  statusJoinEl.textContent = 'Connecting...';
+  isHost = false;
+  myColor = 'b';
+
+  peer = new Peer();
+
+  peer.on('open', () => {
+    conn = peer.connect(hostId, {reliable:true});
+    setupConnection();
+    conn.on('open', () => {
+      statusJoinEl.textContent = 'Connected!';
+      startGame();
+    });
+  });
+
+  peer.on('error', err => {
+    statusJoinEl.textContent = 'Connection error: ' + err.type;
+    document.getElementById('joinBtn').disabled = false;
+  });
+}
+
+function setupConnection(){
+  conn.on('data', handleData);
+  conn.on('close', () => {
+    connStatusEl.textContent = 'opponent disconnected';
+    disableBoard();
+  });
+  conn.on('error', () => {
+    connStatusEl.textContent = 'connection error';
+  });
+}
+
+function handleData(data){
+  if (data.type === 'move') {
+    game.move(data.move);
+    lastMove = data.move;
+    renderBoard();
+    updateTurnBanner();
+    checkGameOver();
+  } else if (data.type === 'resign') {
+    turnBanner.textContent = 'Your opponent resigned. You win!';
+    disableBoard();
+  }
+}
+
+function startGame(){
+  lobby.style.display = 'none';
+  gameArea.style.display = 'flex';
+  youAreEl.textContent = 'You are ' + (myColor === 'w' ? 'White' : 'Black');
+  connStatusEl.textContent = 'connected';
+  renderBoard();
+  updateTurnBanner();
+}
+
+// ---------- Board rendering ----------
+
+function renderBoard(){
+  boardEl.innerHTML = '';
+  const boardState = game.board(); // 8x8, row0 = rank8
+
+  // Flip board for black player so their own pieces sit at the bottom
+  const rowOrder = myColor === 'b' ? [...Array(8).keys()] : [...Array(8).keys()].reverse();
+  const colOrder = myColor === 'b' ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
+
+  for (const r of rowOrder) {
+    for (const c of colOrder) {
+      const file = 'abcdefgh'[c];
+      const rank = 8 - r;
+      const square = file + rank;
+      const isLight = (r + c) % 2 === 0;
+
+      const sq = document.createElement('div');
+      sq.className = 'sq ' + (isLight ? 'light' : 'dark');
+      sq.dataset.square = square;
+
+      if (selected === square) sq.classList.add('selected');
+      if (lastMove && (lastMove.from === square || lastMove.to === square)) sq.classList.add('lastmove');
+
+      const target = legalTargets.find(m => m.to === square);
+      if (target) {
+        sq.classList.add('legal');
+        if (target.flags.includes('c') || target.flags.includes('e')) sq.classList.add('capture');
+      }
+
+      const piece = boardState[r][c];
+      if (piece) {
+        const span = document.createElement('span');
+        span.className = 'piece ' + (piece.color === 'w' ? 'white' : 'black');
+        span.textContent = PIECE_GLYPHS[piece.type];
+        sq.appendChild(span);
+      }
+
+      sq.addEventListener('click', () => onSquareClick(square));
+      boardEl.appendChild(sq);
+    }
+  }
+}
+
+function onSquareClick(square){
+  if (game.game_over()) return;
+  if (game.turn() !== myColor) return; // not your turn
+
+  const piece = game.get(square);
+
+  // If a square is already selected and this click is a legal target, make the move
+  if (selected) {
+    const move = legalTargets.find(m => m.to === square);
+    if (move) {
+      makeMove(selected, square, move);
+      return;
+    }
+  }
+
+  // Otherwise, select a new piece if it belongs to you
+  if (piece && piece.color === myColor) {
+    selected = square;
+    legalTargets = game.moves({square: square, verbose: true});
+  } else {
+    selected = null;
+    legalTargets = [];
+  }
+  renderBoard();
+}
+
+function makeMove(from, to, moveInfo){
+  let promotion = undefined;
+  const isPromotion = moveInfo.flags.includes('p');
+
+  const applyAndSend = (promo) => {
+    const moveObj = {from, to};
+    if (promo) moveObj.promotion = promo;
+    const result = game.move(moveObj);
+    if (!result) return;
+    lastMove = {from, to};
+    selected = null;
+    legalTargets = [];
+    renderBoard();
+    updateTurnBanner();
+    if (conn && conn.open) conn.send({type:'move', move: moveObj});
+    checkGameOver();
+  };
+
+  if (isPromotion) {
+    showPromotionPicker(myColor, (choice) => applyAndSend(choice));
+  } else {
+    applyAndSend();
+  }
+}
+
+function showPromotionPicker(color, callback){
+  const modal = document.getElementById('promoModal');
+  const box = document.getElementById('promoBox');
+  box.innerHTML = '';
+  const options = ['q','r','b','n'];
+  options.forEach(opt => {
+    const btn = document.createElement('button');
+    btn.className = 'piece ' + (color === 'w' ? 'white' : 'black');
+    btn.style.background = 'var(--panel)';
+    btn.style.border = '1px solid #4a473d';
+    btn.textContent = PIECE_GLYPHS[opt];
+    btn.addEventListener('click', () => {
+      modal.style.display = 'none';
+      callback(opt);
+    });
+    box.appendChild(btn);
+  });
+  modal.style.display = 'flex';
+}
+
+function updateTurnBanner(){
+  if (game.in_checkmate()) {
+    const winner = game.turn() === 'w' ? 'Black' : 'White';
+    turnBanner.textContent = 'Checkmate — ' + winner + ' wins.';
+    return;
+  }
+  if (game.in_draw() || game.in_stalemate() || game.in_threefold_repetition()) {
+    turnBanner.textContent = 'Draw.';
+    return;
+  }
+  const turnColor = game.turn() === 'w' ? 'White' : 'Black';
+  const isYou = game.turn() === myColor;
+  let text = turnColor + "'s turn" + (isYou ? ' (you)' : '');
+  if (game.in_check()) text += ' — check';
+  turnBanner.textContent = text;
+}
+
+function checkGameOver(){
+  if (game.game_over()) {
+    disableBoard();
+  }
+}
+
+function disableBoard(){
+  document.querySelectorAll('.sq').forEach(sq => {
+    sq.style.pointerEvents = 'none';
+  });
+}
+</script>
+</body>
+</html>
