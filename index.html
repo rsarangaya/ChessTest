@@ -167,6 +167,14 @@
   .link-box{ display:flex; gap:8px; }
   .link-box input{ margin-bottom:0; }
   .copy-btn{ width:auto; padding:10px 14px; }
+  #diag{ display:none; }
+  #diag ol{ list-style:none; padding:0; margin:0 0 12px; font-size:13px; }
+  #diag li{ padding:4px 0; color:var(--muted); }
+  #diag li::before{ content:"○ "; }
+  #diag li.now{ color:var(--text); }  #diag li.now::before{ content:"… "; }
+  #diag li.ok{ color:#9bc27a; }       #diag li.ok::before{ content:"✓ "; }
+  #diag li.bad{ color:#e0786c; }      #diag li.bad::before{ content:"✗ "; }
+  #diagNote{ font-size:13px; line-height:1.5; margin:0 0 12px; }
   #promoModal{
     display:none;
     position:fixed;
@@ -221,6 +229,12 @@
   </div>
 </div>
 
+<div id="diag" class="panel">
+  <ol id="diagSteps"></ol>
+  <div id="diagNote"></div>
+  <button class="secondary" id="reportBtn">Copy connection report</button>
+</div>
+
 <div id="gameArea">
   <div id="topInfo">
     <span id="youAre">You are —</span>
@@ -240,6 +254,11 @@
 
 <p class="footnote">Peer-to-peer over WebRTC. Moves travel directly between your two browsers; nothing is stored on a server. Works fine hosted from GitHub Pages.</p>
 
+<script>
+if (typeof Chess === 'undefined' || typeof Peer === 'undefined') {
+  document.getElementById('lobby').innerHTML = '<p>A library this page needs did not download. Check your connection or ad blocker, then reload.</p>';
+}
+</script>
 <script>
 const PIECE_GLYPHS = {
   p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚'
@@ -304,30 +323,150 @@ document.getElementById('newLinkBtn').addEventListener('click', () => {
   window.location.href = window.location.pathname;
 });
 
+// ---------- Connection status ----------
+const SERVER_LIMIT = 15000, CONNECT_LIMIT = 20000;
+const diag = { role: '', steps: [], note: '', log: [], mine: new Set(), theirs: new Set(), ice: '-', started: 0 };
+let timer = 0, watcher = 0;
+
+function note(text){
+  diag.note = text;
+  document.getElementById('diagNote').textContent = text;
+}
+function logLine(text){
+  diag.log.push(((Date.now() - diag.started) / 1000).toFixed(1) + 's ' + text);
+}
+function beginDiag(role){
+  clearTimeout(timer); clearInterval(watcher);
+  Object.assign(diag, { role, log: [], mine: new Set(), theirs: new Set(), ice: '-', started: Date.now() });
+  diag.steps = ['Libraries loaded', 'Reach the matchmaking server',
+    role === 'host' ? 'Wait for your opponent' : 'Find the host', 'Open the connection'].map(label => ({ label, state: '' }));
+  document.getElementById('diag').style.display = 'block';
+  setStep(0, 'ok'); setStep(1, 'now'); note('');
+}
+function setStep(i, state){
+  diag.steps[i].state = state;
+  document.getElementById('diagSteps').innerHTML = diag.steps.map((s, n) => '<li class="' + s.state + '">' + (n + 1) + '. ' + s.label + '</li>').join('');
+  if (state === 'ok' || state === 'bad') logLine('step ' + (i + 1) + ' ' + (state === 'ok' ? 'done' : 'FAILED'));
+}
+function fail(step, why){
+  clearTimeout(timer); clearInterval(watcher);
+  setStep(step, 'bad'); note(why); logLine(why);
+}
+
+const ERRORS = {
+  'peer-unavailable': 'That game was not found. The host may have closed the tab, or the link is old. Ask for a new link.',
+  'network': 'Lost contact with the matchmaking server. Check your internet connection.',
+  'server-error': 'The matchmaking server is not responding. Try again in a few minutes.',
+  'socket-error': 'The connection to the matchmaking server failed. A firewall or VPN may be blocking it.',
+  'socket-closed': 'The matchmaking server closed the connection. Reload and try again.',
+  'browser-incompatible': 'This browser does not support WebRTC.',
+  'webrtc': 'The browser could not set up the connection.'
+};
+
+// which kinds of route each side found (never the addresses themselves)
+async function sample(pc){
+  const stats = await pc.getStats();
+  let pair = null;
+  stats.forEach(r => {
+    if (r.type === 'local-candidate') diag.mine.add(r.candidateType);
+    if (r.type === 'remote-candidate') diag.theirs.add(r.candidateType);
+    if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) pair = r;
+  });
+  if (!pair) return null;
+  const a = stats.get(pair.localCandidateId), b = stats.get(pair.remoteCandidateId);
+  return (a && a.candidateType === 'relay') || (b && b.candidateType === 'relay') ? 'through a relay' : 'direct';
+}
+function explain(){
+  if (!diag.mine.has('srflx') && !diag.mine.has('relay')) return 'Your network did not reveal a public route. A VPN, firewall or strict Wi-Fi is the likely cause.';
+  if (!diag.theirs.size) return 'The other side never sent any routes. Ask them to keep the tab open and try again.';
+  if (!diag.mine.has('relay')) return 'Both sides tried, but no direct path worked and no relay answered. Try turning off VPNs, or put one player on a different network.';
+  return 'No path between the two networks worked, even with a relay. Try a different network on one side.';
+}
+
+// watch one attempt until it opens or runs out of time
+function watch(c, onFail){
+  const pc = c.peerConnection;
+  let answered = false;
+  clearTimeout(timer); clearInterval(watcher);
+  watcher = setInterval(async () => {
+    if (!pc || pc.signalingState === 'closed') return;
+    if (!answered && pc.remoteDescription) { answered = true; setStep(2, 'ok'); setStep(3, 'now'); }
+    if (pc.iceConnectionState !== diag.ice) { diag.ice = pc.iceConnectionState; logLine('network state: ' + diag.ice); }
+    await sample(pc);
+    if (diag.ice === 'failed') onFail();
+  }, 500);
+  timer = setTimeout(onFail, CONNECT_LIMIT);
+  c.on('open', async () => {
+    clearTimeout(timer); clearInterval(watcher);
+    setStep(2, 'ok'); setStep(3, 'ok');
+    const path = pc ? await sample(pc) : null;
+    logLine('connected ' + (path || ''));
+    note('Connected' + (path ? ' (' + path + ')' : '') + '.');
+    if (path) document.getElementById('connStatus').textContent = 'connected, ' + path;
+  });
+}
+
+document.getElementById('reportBtn').addEventListener('click', () => {
+  const kinds = set => ['host', 'srflx', 'relay'].map(k => k + ':' + (set.has(k) || (k === 'srflx' && set.has('prflx')) ? 'yes' : 'no')).join(' ');
+  const text = ['Chess connection report (' + diag.role + ')',
+    ...diag.steps.map((s, i) => (i + 1) + '. ' + s.label + ': ' + (s.state || 'not reached')),
+    'my routes   ' + kinds(diag.mine), 'their routes ' + kinds(diag.theirs), 'network state: ' + diag.ice, diag.note, '', ...diag.log].join('\n');
+  const button = document.getElementById('reportBtn');
+  navigator.clipboard.writeText(text)
+    .then(() => { button.textContent = 'Report copied'; })
+    .catch(() => { note(text); document.getElementById('diagNote').style.whiteSpace = 'pre-wrap'; });
+});
+
+// ---------- Creating and joining ----------
+function openPeer(onOpen){
+  if (peer) peer.destroy();
+  peer = new Peer();
+  timer = setTimeout(() => {
+    fail(1, 'The matchmaking server did not answer in time. Check your connection, VPN or ad blocker.');
+    peer.destroy(); retryJoin();
+  }, SERVER_LIMIT);
+  peer.on('open', id => { clearTimeout(timer); setStep(1, 'ok'); setStep(2, 'now'); onOpen(id); });
+}
+function retryJoin(){
+  if (isHost) return;
+  document.getElementById('joinBtn').disabled = false;
+  statusJoinEl.textContent = 'Press Join Game to try again.';
+}
+
 function createGame(){
   lobbyHome.style.display = 'none';
   lobbyHost.style.display = 'block';
   isHost = true;
   myColor = 'w';
+  statusEl.textContent = 'Setting up...';
+  beginDiag('host');
 
-  peer = new Peer();
-
-  peer.on('open', id => {
+  openPeer(id => {
     document.getElementById('linkOut').value = buildInviteLink(id);
     statusEl.textContent = 'Waiting for your opponent to open the link...';
+    note('Send the link, then leave this tab open and visible.');
   });
 
   peer.on('connection', c => {
+    if (conn && conn.open) { c.close(); return; }       // one opponent per game
     conn = c;
     setupConnection();
-    conn.on('open', () => {
+    setStep(2, 'ok'); setStep(3, 'now'); note('Your opponent is connecting...');
+    watch(c, () => {
+      fail(3, explain());
+      c.close(); conn = null;
+      setStep(2, 'now'); statusEl.textContent = 'That attempt failed. Still waiting; they can try the link again.';
+    });
+    c.on('open', () => {
       statusEl.textContent = 'Opponent connected!';
       startGame();
     });
   });
 
   peer.on('error', err => {
-    statusEl.textContent = 'Connection error: ' + err.type;
+    const why = ERRORS[err.type] || 'Connection error: ' + err.type;
+    statusEl.textContent = why;
+    fail(diag.steps[1].state === 'ok' ? 3 : 1, why);
   });
 }
 
@@ -337,12 +476,15 @@ function joinGame(hostId){
   statusJoinEl.textContent = 'Connecting...';
   isHost = false;
   myColor = 'b';
+  beginDiag('guest');
 
-  peer = new Peer();
-
-  peer.on('open', () => {
+  openPeer(() => {
     conn = peer.connect(hostId, {reliable:true});
     setupConnection();
+    watch(conn, () => {
+      fail(diag.steps[2].state === 'ok' ? 3 : 2, diag.steps[2].state === 'ok' ? explain() : 'The host did not reply. Ask them to keep their tab open and visible, then try again.');
+      peer.destroy(); retryJoin();
+    });
     conn.on('open', () => {
       statusJoinEl.textContent = 'Connected!';
       startGame();
@@ -350,8 +492,9 @@ function joinGame(hostId){
   });
 
   peer.on('error', err => {
-    statusJoinEl.textContent = 'Connection error: ' + err.type;
-    document.getElementById('joinBtn').disabled = false;
+    const why = ERRORS[err.type] || 'Connection error: ' + err.type;
+    fail(diag.steps[1].state !== 'ok' ? 1 : err.type === 'peer-unavailable' ? 2 : 3, why);
+    retryJoin();
   });
 }
 
@@ -381,6 +524,7 @@ function handleData(data){
 
 function startGame(){
   lobby.style.display = 'none';
+  document.getElementById('diag').style.display = 'none';
   gameArea.style.display = 'flex';
   youAreEl.textContent = 'You are ' + (myColor === 'w' ? 'White' : 'Black');
   connStatusEl.textContent = 'connected';
